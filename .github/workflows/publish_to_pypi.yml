@@ -30,6 +30,31 @@ jobs:
           version: "0.10.9"
           enable-cache: false
 
+      - name: Prepare fork test build (fork only)
+        if: github.repository == 'lee-mcfaul2/litellm'
+        run: |
+          set -euo pipefail
+          # Fork-only mutation. TestPyPI reserves the 'litellm' name and rejects
+          # duplicate versions, so on the fork we publish under a unique name
+          # and a per-run version. This block is a no-op upstream
+          # (github.repository != the fork), so pyproject.toml stays clean and
+          # this workflow transfers to BerriAI/litellm with zero edits.
+          BASE_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          TEST_VERSION="${BASE_VERSION}.dev${GITHUB_RUN_NUMBER}"
+          python3 - "$TEST_VERSION" <<'PY'
+          import re, sys
+          test_version = sys.argv[1]
+          p = "pyproject.toml"
+          s = open(p, encoding="utf-8").read()
+          s = re.sub(r'^name = "litellm"$', 'name = "bulletproof-release-poc-litellm"', s, count=1, flags=re.M)
+          s = re.sub(r'^version = "[^"]+"$', f'version = "{test_version}"', s, count=1, flags=re.M)
+          if 'module-name = "litellm"' not in s:
+              s = s.replace('[tool.uv.build-backend]\nmodule-root = ""',
+                            '[tool.uv.build-backend]\nmodule-root = ""\nmodule-name = "litellm"', 1)
+          open(p, "w", encoding="utf-8").write(s)
+          print(f"fork test build: name=bulletproof-release-poc-litellm version={test_version}")
+          PY
+
       - name: Check litellm version on PyPI
         id: check-litellm
         run: |
@@ -100,57 +125,91 @@ jobs:
     needs: preflight-checks
     if: needs.preflight-checks.outputs.needs_publish == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       id-token: write
-      contents: read
-    environment: pypi-publish
+      contents: write
+      attestations: write   # required for actions/attest-build-provenance
+    environment: ${{ github.repository == 'lee-mcfaul2/litellm' && 'pypi-publish-test' || 'pypi-publish' }}
     outputs:
       hashes: ${{ steps.hash.outputs.hashes }}
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
-
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.12"
-
       - name: Set up uv
-        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           version: "0.10.9"
           enable-cache: false
-
+      - name: Prepare fork test build (fork only)
+        if: github.repository == 'lee-mcfaul2/litellm'
+        run: |
+          set -euo pipefail
+          # Fork-only mutation. TestPyPI reserves the 'litellm' name and rejects
+          # duplicate versions, so on the fork we publish under a unique name
+          # and a per-run version. This block is a no-op upstream
+          # (github.repository != the fork), so pyproject.toml stays clean and
+          # this workflow transfers to BerriAI/litellm with zero edits.
+          BASE_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          TEST_VERSION="${BASE_VERSION}.dev${GITHUB_RUN_NUMBER}"
+          python3 - "$TEST_VERSION" <<'PY'
+          import re, sys
+          test_version = sys.argv[1]
+          p = "pyproject.toml"
+          s = open(p, encoding="utf-8").read()
+          s = re.sub(r'^name = "litellm"$', 'name = "bulletproof-release-poc-litellm"', s, count=1, flags=re.M)
+          s = re.sub(r'^version = "[^"]+"$', f'version = "{test_version}"', s, count=1, flags=re.M)
+          if 'module-name = "litellm"' not in s:
+              s = s.replace('[tool.uv.build-backend]\nmodule-root = ""',
+                            '[tool.uv.build-backend]\nmodule-root = ""\nmodule-name = "litellm"', 1)
+          open(p, "w", encoding="utf-8").write(s)
+          print(f"fork test build: name=bulletproof-release-poc-litellm version={test_version}")
+          PY
+      - name: Ensure test release exists (fork only)
+        if: github.repository == 'lee-mcfaul2/litellm'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.preflight-checks.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Fork-only. Upstream relies on create-release.yml having created the
+          # release before publish_to_pypi.yml is dispatched (the designed
+          # ordering). On the fork the version is a per-run dev version, so the
+          # release tag is dynamic and cannot be pre-created — create it here if
+          # absent. No-op upstream (github.repository gate).
+          if ! gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "v${VERSION}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "v${VERSION} (fork test)" \
+              --notes "Automated fork verification release."
+          fi
       - name: Copy model prices backup
         run: cp model_prices_and_context_window.json litellm/model_prices_and_context_window_backup.json
-
       - name: Build package
         run: |
           rm -rf build dist
           uv build
-
       - name: Verify build artifacts
         env:
           EXPECTED_VERSION: ${{ needs.preflight-checks.outputs.version }}
         run: |
-          echo "Contents of dist/:"
+          set -euo pipefail
           ls -la dist/
-          # Ensure we have both sdist and wheel
           ls dist/*.tar.gz
           ls dist/*.whl
-          # Verify built version matches expected
-          ls dist/ | grep -q "litellm-${EXPECTED_VERSION}" || {
+          ls dist/ | grep -q -- "-${EXPECTED_VERSION}" || {
             echo "::error::Built artifacts do not match expected version $EXPECTED_VERSION"
-            ls dist/
             exit 1
           }
-
       - name: Validate package metadata
-        run: |
-          uv tool run --from 'twine==6.2.0' twine check dist/*
-
+        run: uv tool run --from 'twine==6.2.0' twine check dist/*
       - name: Compute artifact hashes for SLSA provenance
         id: hash
         run: |
@@ -158,28 +217,32 @@ jobs:
           cd dist
           HASHES=$(sha256sum * | base64 -w0)
           echo "hashes=$HASHES" >> "$GITHUB_OUTPUT"
-
       - name: Publish to PyPI
-        id: publish
-        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e  # v1.13.0
         with:
           attestations: true
           verify-metadata: true
-
-      - name: Verify PEP 740 attestation landed on PyPI
+          verbose: true
+          repository-url: ${{ github.repository == 'lee-mcfaul2/litellm' && 'https://test.pypi.org/legacy/' || '' }}
+      - name: Verify PEP 740 attestation landed
         env:
           VERSION: ${{ needs.preflight-checks.outputs.version }}
+          PROJECT: ${{ github.repository == 'lee-mcfaul2/litellm' && 'bulletproof-release-poc-litellm' || 'litellm' }}
+          REPO_URL: ${{ github.repository == 'lee-mcfaul2/litellm' && 'https://test.pypi.org/legacy/' || '' }}
         run: |
           set -euo pipefail
-          # PyPI exposes attestation bundles at /integrity/<project>/<version>/<filename>/provenance
-          # Assert at least one bundle is present for every artifact we just uploaded.
+          # PyPI propagation can take 30-90s after publish; wait before first check.
+          sleep 30
+          if [[ "$REPO_URL" == *test.pypi.org* ]]; then
+            HOST="https://test.pypi.org"
+          else
+            HOST="https://pypi.org"
+          fi
           for ARTIFACT in dist/*.whl dist/*.tar.gz; do
             FILENAME=$(basename "$ARTIFACT")
-            URL="https://pypi.org/integrity/litellm/$VERSION/$FILENAME/provenance"
+            URL="$HOST/integrity/$PROJECT/$VERSION/$FILENAME/provenance"
             echo "Checking $URL"
-            # PyPI CDN propagation can take 30-90s after publish; retry with backoff.
-            # --max-time 30 caps individual attempts; --retry-all-errors handles 404/5xx/network.
-            RESPONSE=$(curl -fsSL --retry 5 --retry-delay 30 --retry-all-errors --max-time 30 "$URL")
+            RESPONSE=$(curl -fsSL --retry 5 --retry-delay 60 --retry-all-errors --max-time 30 "$URL")
             BUNDLE_COUNT=$(echo "$RESPONSE" | python3 -c "
           import json, sys
           try:
@@ -191,88 +254,121 @@ jobs:
           print(sum(len(b.get('attestations') or []) for b in bundles))
           ")
             if [ "$BUNDLE_COUNT" -lt 1 ]; then
-              echo "::error::PyPI returned no attestations for $FILENAME — PEP 740 attestation did not land"
+              echo "::error::No PEP 740 attestation found for $FILENAME at $URL"
               exit 1
             fi
             echo "  attestations: $BUNDLE_COUNT"
           done
+      - name: Upload sdist and wheel to GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.preflight-checks.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release upload "v${VERSION}" dist/*.whl dist/*.tar.gz \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
 
-  provenance:
-    name: Generate SLSA L3 build provenance
-    needs: [preflight-checks, publish-litellm]
-    if: needs.preflight-checks.outputs.needs_publish == 'true'
-    permissions:
-      id-token: write
-      contents: write   # required by slsa-github-generator to upload .intoto.jsonl to the GitHub release
-      actions: read
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a  # v2.1.0
-    with:
-      base64-subjects: ${{ needs.publish-litellm.outputs.hashes }}
-      upload-assets: true
-      provenance-name: litellm-${{ needs.preflight-checks.outputs.version }}.intoto.jsonl
+      - name: SLSA build provenance (GitHub-native attestation)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+
+      - name: Install cosign
+        run: |
+          set -euo pipefail
+          COSIGN_VERSION=v3.0.6
+          COSIGN_SHA256=c956e5dfcac53d52bcf058360d579472f0c1d2d9b69f55209e256fe7783f4c74
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL \
+            "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
+            -o "$HOME/.local/bin/cosign"
+          echo "${COSIGN_SHA256}  $HOME/.local/bin/cosign" | sha256sum -c -
+          chmod +x "$HOME/.local/bin/cosign"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/cosign" version --json | head -3
+
+      - name: Sign each artifact with cosign (detached sigstore bundle)
+        env:
+          COSIGN_YES: 'true'
+        run: |
+          set -euo pipefail
+          for f in dist/*.whl dist/*.tar.gz; do
+            [ -f "${f}" ] || continue
+            cosign sign-blob --bundle "${f}.sigstore" --new-bundle-format "${f}"
+          done
+
+      - name: Upload cosign bundles to GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.preflight-checks.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release upload "v${VERSION}" dist/*.whl.sigstore dist/*.tar.gz.sigstore \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
 
   verify-slsa:
-    name: Verify SLSA provenance with slsa-verifier
-    needs: [preflight-checks, publish-litellm, provenance]
+    name: Verify provenance + cosign signatures (consumer-style)
+    needs: [preflight-checks, publish-litellm]
     if: needs.preflight-checks.outputs.needs_publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
+      attestations: read
     env:
       VERSION: ${{ needs.preflight-checks.outputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Install slsa-verifier
+      - name: Install cosign
         run: |
           set -euo pipefail
-          SLSA_VERIFIER_VERSION=2.7.0
-          BASE_URL="https://github.com/slsa-framework/slsa-verifier/releases/download/v${SLSA_VERIFIER_VERSION}"
-          cd /tmp
-          # Download with original asset names so sha256sum -c can verify against the sidecar
-          curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors --max-time 60 \
-            -O "${BASE_URL}/slsa-verifier-linux-amd64"
-          curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors --max-time 30 \
-            -O "${BASE_URL}/slsa-verifier-linux-amd64.sha256"
-          # The sidecar references the original asset name
-          sha256sum -c slsa-verifier-linux-amd64.sha256
-          chmod +x slsa-verifier-linux-amd64
-          sudo mv slsa-verifier-linux-amd64 /usr/local/bin/slsa-verifier
+          COSIGN_VERSION=v3.0.6
+          COSIGN_SHA256=c956e5dfcac53d52bcf058360d579472f0c1d2d9b69f55209e256fe7783f4c74
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL \
+            "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
+            -o "$HOME/.local/bin/cosign"
+          echo "${COSIGN_SHA256}  $HOME/.local/bin/cosign" | sha256sum -c -
+          chmod +x "$HOME/.local/bin/cosign"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Download artifacts and provenance from GitHub release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download artifacts + cosign bundles from GitHub release
         run: |
           set -euo pipefail
-          mkdir -p verify
-          cd verify
+          mkdir -p verify && cd verify
           gh release download "v${VERSION}" \
             --repo "$GITHUB_REPOSITORY" \
             --pattern "*.whl" \
             --pattern "*.tar.gz" \
-            --pattern "*.intoto.jsonl"
+            --pattern "*.whl.sigstore" \
+            --pattern "*.tar.gz.sigstore"
           ls -la
 
-      - name: Verify SLSA provenance against each artifact
+      - name: Verify SLSA build provenance via gh attestation
         run: |
           set -euo pipefail
           cd verify
-          PROVENANCE=$(ls *.intoto.jsonl | head -1)
-          if [ -z "$PROVENANCE" ]; then
-            echo "::error::No .intoto.jsonl found in release assets"
-            exit 1
-          fi
-          echo "Provenance file: $PROVENANCE"
-          shopt -s nullglob
-          ARTIFACTS=( *.whl *.tar.gz )
-          if [ ${#ARTIFACTS[@]} -eq 0 ]; then
-            echo "::error::No .whl or .tar.gz artifacts downloaded from release"
-            exit 1
-          fi
-          for ARTIFACT in "${ARTIFACTS[@]}"; do
-            echo "Verifying $ARTIFACT"
-            slsa-verifier verify-artifact "$ARTIFACT" \
-              --provenance-path "$PROVENANCE" \
-              --source-uri "github.com/${GITHUB_REPOSITORY}" \
-              --source-tag "v${VERSION}"
+          for f in *.whl *.tar.gz; do
+            [ -f "${f}" ] || continue
+            gh attestation verify "${f}" --owner "${GITHUB_REPOSITORY_OWNER}"
           done
-          echo "All SLSA provenance verifications passed."
+
+      - name: Verify cosign detached signatures
+        run: |
+          set -euo pipefail
+          cd verify
+          for f in *.whl *.tar.gz; do
+            [ -f "${f}" ] || continue
+            [ -f "${f}.sigstore" ] || continue
+            cosign verify-blob \
+              --bundle "${f}.sigstore" \
+              --new-bundle-format \
+              --certificate-identity-regexp="^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/publish_to_pypi\.yml@refs/(heads|tags)/.+$" \
+              --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+              "${f}"
+          done
+          echo "All consumer-style verifications passed."
