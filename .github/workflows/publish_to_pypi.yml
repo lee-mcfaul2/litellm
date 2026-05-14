@@ -105,6 +105,8 @@ jobs:
       id-token: write
       contents: read
     environment: pypi-publish
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
 
     steps:
       - name: Checkout repo
@@ -149,6 +151,14 @@ jobs:
         run: |
           uv tool run --from 'twine==6.2.0' twine check dist/*
 
+      - name: Compute artifact hashes for SLSA provenance
+        id: hash
+        run: |
+          set -euo pipefail
+          cd dist
+          HASHES=$(sha256sum * | base64 -w0)
+          echo "hashes=$HASHES" >> "$GITHUB_OUTPUT"
+
       - name: Publish to PyPI
         id: publish
         uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
@@ -186,3 +196,83 @@ jobs:
             fi
             echo "  attestations: $BUNDLE_COUNT"
           done
+
+  provenance:
+    name: Generate SLSA L3 build provenance
+    needs: [preflight-checks, publish-litellm]
+    if: needs.preflight-checks.outputs.needs_publish == 'true'
+    permissions:
+      id-token: write
+      contents: write   # required by slsa-github-generator to upload .intoto.jsonl to the GitHub release
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a  # v2.1.0
+    with:
+      base64-subjects: ${{ needs.publish-litellm.outputs.hashes }}
+      upload-assets: true
+      provenance-name: litellm-${{ needs.preflight-checks.outputs.version }}.intoto.jsonl
+
+  verify-slsa:
+    name: Verify SLSA provenance with slsa-verifier
+    needs: [preflight-checks, publish-litellm, provenance]
+    if: needs.preflight-checks.outputs.needs_publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.preflight-checks.outputs.version }}
+    steps:
+      - name: Install slsa-verifier
+        run: |
+          set -euo pipefail
+          SLSA_VERIFIER_VERSION=2.7.0
+          BASE_URL="https://github.com/slsa-framework/slsa-verifier/releases/download/v${SLSA_VERIFIER_VERSION}"
+          cd /tmp
+          # Download with original asset names so sha256sum -c can verify against the sidecar
+          curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors --max-time 60 \
+            -O "${BASE_URL}/slsa-verifier-linux-amd64"
+          curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors --max-time 30 \
+            -O "${BASE_URL}/slsa-verifier-linux-amd64.sha256"
+          # The sidecar references the original asset name
+          sha256sum -c slsa-verifier-linux-amd64.sha256
+          chmod +x slsa-verifier-linux-amd64
+          sudo mv slsa-verifier-linux-amd64 /usr/local/bin/slsa-verifier
+
+      - name: Download artifacts and provenance from GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p verify
+          cd verify
+          gh release download "v${VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "*.whl" \
+            --pattern "*.tar.gz" \
+            --pattern "*.intoto.jsonl"
+          ls -la
+
+      - name: Verify SLSA provenance against each artifact
+        run: |
+          set -euo pipefail
+          cd verify
+          PROVENANCE=$(ls *.intoto.jsonl | head -1)
+          if [ -z "$PROVENANCE" ]; then
+            echo "::error::No .intoto.jsonl found in release assets"
+            exit 1
+          fi
+          echo "Provenance file: $PROVENANCE"
+          shopt -s nullglob
+          ARTIFACTS=( *.whl *.tar.gz )
+          if [ ${#ARTIFACTS[@]} -eq 0 ]; then
+            echo "::error::No .whl or .tar.gz artifacts downloaded from release"
+            exit 1
+          fi
+          for ARTIFACT in "${ARTIFACTS[@]}"; do
+            echo "Verifying $ARTIFACT"
+            slsa-verifier verify-artifact "$ARTIFACT" \
+              --provenance-path "$PROVENANCE" \
+              --source-uri "github.com/${GITHUB_REPOSITORY}" \
+              --source-tag "v${VERSION}"
+          done
+          echo "All SLSA provenance verifications passed."
