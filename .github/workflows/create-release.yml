@@ -65,7 +65,7 @@ jobs:
               ``,
               '```bash',
               `cosign verify \\`,
-              `  --certificate-identity-regexp='^https://github\\.com/BerriAI/litellm/\\.github/workflows/release-docker\\.yml@refs/tags/' \\`,
+              `  --certificate-identity-regexp='^https://github\\.com/BerriAI/litellm/\\.github/workflows/_publish-container\\.yml@refs/tags/' \\`,
               `  --certificate-oidc-issuer='https://token.actions.githubusercontent.com' \\`,
               `  ghcr.io/berriai/litellm:${tag}`,
               '```',
