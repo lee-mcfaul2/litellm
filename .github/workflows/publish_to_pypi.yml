@@ -150,4 +150,39 @@ jobs:
           uv tool run --from 'twine==6.2.0' twine check dist/*
 
       - name: Publish to PyPI
+        id: publish
         uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
+        with:
+          attestations: true
+          verify-metadata: true
+
+      - name: Verify PEP 740 attestation landed on PyPI
+        env:
+          VERSION: ${{ needs.preflight-checks.outputs.version }}
+        run: |
+          set -euo pipefail
+          # PyPI exposes attestation bundles at /integrity/<project>/<version>/<filename>/provenance
+          # Assert at least one bundle is present for every artifact we just uploaded.
+          for ARTIFACT in dist/*.whl dist/*.tar.gz; do
+            FILENAME=$(basename "$ARTIFACT")
+            URL="https://pypi.org/integrity/litellm/$VERSION/$FILENAME/provenance"
+            echo "Checking $URL"
+            # PyPI CDN propagation can take 30-90s after publish; retry with backoff.
+            # --max-time 30 caps individual attempts; --retry-all-errors handles 404/5xx/network.
+            RESPONSE=$(curl -fsSL --retry 5 --retry-delay 30 --retry-all-errors --max-time 30 "$URL")
+            BUNDLE_COUNT=$(echo "$RESPONSE" | python3 -c "
+          import json, sys
+          try:
+              d = json.loads(sys.stdin.read())
+          except json.JSONDecodeError as e:
+              sys.stderr.write(f'::error::PyPI returned non-JSON response: {e}\n')
+              sys.exit(1)
+          bundles = d.get('attestation_bundles') or []
+          print(sum(len(b.get('attestations') or []) for b in bundles))
+          ")
+            if [ "$BUNDLE_COUNT" -lt 1 ]; then
+              echo "::error::PyPI returned no attestations for $FILENAME — PEP 740 attestation did not land"
+              exit 1
+            fi
+            echo "  attestations: $BUNDLE_COUNT"
+          done
