@@ -66,6 +66,7 @@ jobs:
       id-token: write
       contents: read
       packages: write
+      attestations: write
     uses: ./.github/workflows/_publish-container.yml
     with:
       image-name: litellm
@@ -82,6 +83,7 @@ jobs:
       id-token: write
       contents: read
       packages: write
+      attestations: write
     uses: ./.github/workflows/_publish-container.yml
     with:
       image-name: litellm-database
@@ -98,6 +100,7 @@ jobs:
       id-token: write
       contents: read
       packages: write
+      attestations: write
     uses: ./.github/workflows/_publish-container.yml
     with:
       image-name: litellm-non-root
@@ -107,51 +110,6 @@ jobs:
       commit-hash: ${{ needs.preflight.outputs.commit_hash }}
       enable-docker-hub: ${{ inputs.enable_docker_hub }}
 
-  provenance-litellm:
-    needs: [preflight, build-litellm]
-    permissions:
-      id-token: write
-      contents: read
-      packages: write
-      actions: read
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a  # v2.1.0
-    with:
-      image: ${{ needs.build-litellm.outputs.image }}
-      digest: ${{ needs.build-litellm.outputs.digest }}
-      registry-username: ${{ github.actor }}
-    secrets:
-      registry-password: ${{ secrets.GITHUB_TOKEN }}
-
-  provenance-litellm-database:
-    needs: [preflight, build-litellm-database]
-    permissions:
-      id-token: write
-      contents: read
-      packages: write
-      actions: read
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a  # v2.1.0
-    with:
-      image: ${{ needs.build-litellm-database.outputs.image }}
-      digest: ${{ needs.build-litellm-database.outputs.digest }}
-      registry-username: ${{ github.actor }}
-    secrets:
-      registry-password: ${{ secrets.GITHUB_TOKEN }}
-
-  provenance-litellm-non-root:
-    needs: [preflight, build-litellm-non-root]
-    permissions:
-      id-token: write
-      contents: read
-      packages: write
-      actions: read
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a  # v2.1.0
-    with:
-      image: ${{ needs.build-litellm-non-root.outputs.image }}
-      digest: ${{ needs.build-litellm-non-root.outputs.digest }}
-      registry-username: ${{ github.actor }}
-    secrets:
-      registry-password: ${{ secrets.GITHUB_TOKEN }}
-
   verify-all:
     name: Final verification (consumer-style)
     needs:
@@ -159,14 +117,12 @@ jobs:
       - build-litellm
       - build-litellm-database
       - build-litellm-non-root
-      - provenance-litellm
-      - provenance-litellm-database
-      - provenance-litellm-non-root
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
       packages: read
+      attestations: read
     strategy:
       fail-fast: false
       matrix:
@@ -182,19 +138,12 @@ jobs:
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
         with:
           cosign-release: 'v2.4.1'  # Keep in sync with _publish-container.yml's default
-      - name: Install slsa-verifier
-        run: |
-          set -euo pipefail
-          SLSA_VERIFIER_VERSION=2.7.0
-          BASE_URL="https://github.com/slsa-framework/slsa-verifier/releases/download/v${SLSA_VERIFIER_VERSION}"
-          cd /tmp
-          curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors --max-time 60 \
-            -O "${BASE_URL}/slsa-verifier-linux-amd64"
-          curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors --max-time 30 \
-            -O "${BASE_URL}/slsa-verifier-linux-amd64.sha256"
-          sha256sum -c slsa-verifier-linux-amd64.sha256
-          chmod +x slsa-verifier-linux-amd64
-          sudo mv slsa-verifier-linux-amd64 /usr/local/bin/slsa-verifier
+      - name: Log in to GHCR (read-only, for attestation referrer pull)
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Verify cosign signature
         env:
           DIGEST: ${{ matrix.digest }}
@@ -208,12 +157,13 @@ jobs:
             --certificate-identity-regexp="${IDENTITY_RE}" \
             --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
             "ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}@${DIGEST}"
-      - name: Verify SLSA provenance
+      - name: Verify SLSA provenance via gh attestation
         env:
           DIGEST: ${{ matrix.digest }}
+          IMAGE: ${{ matrix.name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          slsa-verifier verify-image \
-            --source-uri "github.com/${GITHUB_REPOSITORY}" \
-            --source-tag "${{ needs.preflight.outputs.tag }}" \
-            "ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}@${DIGEST}"
+          gh attestation verify \
+            "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/${IMAGE}@${DIGEST}" \
+            --owner "${GITHUB_REPOSITORY_OWNER}"

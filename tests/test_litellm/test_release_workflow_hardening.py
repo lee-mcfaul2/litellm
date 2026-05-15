@@ -105,6 +105,32 @@ def test_publish_container_login_steps_have_no_password() -> None:
     )
 
 
+@pytest.mark.parametrize("workflow", RELEASE_WORKFLOWS)
+def test_release_workflows_do_not_use_slsa_github_generator(workflow: str) -> None:
+    """slsa-github-generator's reusables are abandoned here (broken container
+    aggregator / public-fork misdetection). Provenance must come from
+    actions/attest-build-provenance instead."""
+    text = _read_workflow_text(workflow)
+    assert "slsa-framework/slsa-github-generator" not in text, (
+        f"{workflow} references slsa-framework/slsa-github-generator. "
+        "Use actions/attest-build-provenance for GitHub-native SLSA provenance."
+    )
+
+
+def test_container_provenance_uses_attest_build_provenance() -> None:
+    """The container build must generate SLSA provenance via
+    actions/attest-build-provenance with push-to-registry."""
+    text = _read_workflow_text("_publish-container.yml")
+    assert "actions/attest-build-provenance@" in text, (
+        "_publish-container.yml must use actions/attest-build-provenance "
+        "to generate SLSA build provenance for the pushed image"
+    )
+    assert re.search(r"push-to-registry:\s*true", text), (
+        "_publish-container.yml must set 'push-to-registry: true' so the "
+        "provenance attestation is attached as an OCI referrer"
+    )
+
+
 def test_cosign_pub_is_absent_from_repo_root() -> None:
     """The static cosign.pub key must not be present at repo root."""
     assert not (REPO_ROOT / "cosign.pub").exists(), (

@@ -45,6 +45,7 @@ jobs:
       id-token: write
       contents: read
       packages: write
+      attestations: write   # required for actions/attest-build-provenance
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       image: ghcr.io/${{ github.repository_owner }}/${{ inputs.image-name }}
@@ -96,6 +97,12 @@ jobs:
           if [ "${{ inputs.enable-docker-hub }}" = "true" ]; then
             cosign sign --yes "docker.io/litellm/${{ inputs.image-name }}@${DIGEST}"
           fi
+      - name: SLSA build provenance (GitHub-native attestation)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/${{ inputs.image-name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
       - name: Post-sign verify
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
