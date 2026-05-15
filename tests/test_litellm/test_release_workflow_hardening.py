@@ -21,7 +21,6 @@ RELEASE_WORKFLOWS = [
     "publish_to_pypi.yml",
     "release-docker.yml",
     "create-release.yml",
-    "_publish-pypi.yml",
     "_publish-container.yml",
 ]
 
@@ -61,21 +60,21 @@ def test_release_workflows_only_use_sha_pinned_actions(workflow: str) -> None:
 
 def test_publish_pypi_has_explicit_attestations_true() -> None:
     """The PyPI publish step must explicitly set attestations: true."""
-    text = _read_workflow_text("_publish-pypi.yml")
+    text = _read_workflow_text("publish_to_pypi.yml")
     assert re.search(
         r"attestations:\s*true", text
-    ), "_publish-pypi.yml must set 'attestations: true' explicitly"
+    ), "publish_to_pypi.yml must set 'attestations: true' explicitly"
 
 
 def test_publish_pypi_does_not_pass_password_to_pypi_publish() -> None:
     """No `password:` input is passed to pypa/gh-action-pypi-publish (OIDC only)."""
-    text = _read_workflow_text("_publish-pypi.yml")
+    text = _read_workflow_text("publish_to_pypi.yml")
     lines = text.splitlines()
     for idx, line in enumerate(lines):
         if "pypa/gh-action-pypi-publish" in line:
             window = "\n".join(lines[idx : idx + 30])
             assert "password:" not in window, (
-                "Found `password:` near pypa/gh-action-pypi-publish in _publish-pypi.yml — "
+                "Found `password:` near pypa/gh-action-pypi-publish in publish_to_pypi.yml — "
                 "static credentials must not be passed; OIDC is mandatory"
             )
 

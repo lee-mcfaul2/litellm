@@ -1,6 +1,6 @@
 [project]
-name = "litellm"
-version = "1.85.0"
+name = "bulletproof-release-poc-litellm"
+version = "1.85.3"
 description = "Library to easily interface with LLM API providers"
 readme = "README.md"
 requires-python = ">=3.10, <3.14"
@@ -234,6 +234,7 @@ members = ["enterprise", "litellm-proxy-extras"]
 
 [tool.uv.build-backend]
 module-root = ""
+module-name = "litellm"
 source-exclude = [
     "litellm/proxy/enterprise",
     "**/__pycache__",
